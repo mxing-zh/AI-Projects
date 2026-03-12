@@ -9,6 +9,7 @@ from typing import Iterable, List
 
 SUPPORTED_IMAGE_FORMATS = {"png", "jpg", "jpeg"}
 LAYOUT_MODELS = {"auto", "model", "layout"}
+COLOR_MODES = {"bw", "original"}
 
 
 @dataclass
@@ -21,6 +22,7 @@ class ConvertConfig:
     oda_converter: Path | None = None
     layout_mode: str = "auto"
     preferred_layout: str | None = None
+    color_mode: str = "bw"
 
     def normalized_format(self) -> str:
         fmt = self.image_format.lower().strip(".")
@@ -34,6 +36,12 @@ class ConvertConfig:
         mode = self.layout_mode.lower().strip()
         if mode not in LAYOUT_MODELS:
             raise ValueError(f"Unsupported layout mode: {self.layout_mode}")
+        return mode
+
+    def normalized_color_mode(self) -> str:
+        mode = self.color_mode.lower().strip()
+        if mode not in COLOR_MODES:
+            raise ValueError(f"Unsupported color mode: {self.color_mode}")
         return mode
 
 
@@ -84,13 +92,18 @@ def _pick_layout(doc, mode: str, preferred_layout: str | None) -> tuple[object, 
     preferred = preferred_layout.strip().lower() if preferred_layout else ""
     paperspaces = [layout for layout in doc.layouts if layout.name.lower() != "model"]
 
+    def has_renderable_entities(layout) -> bool:
+        # PaperSpace often contains VIEWPORT + title block + annotations.
+        # A layout with at least one entity is usually renderable.
+        return len(layout) > 0
+
     if mode == "layout":
         if preferred:
             for layout in paperspaces:
                 if layout.name.lower() == preferred:
                     return layout, layout.name
         for layout in paperspaces:
-            if len(layout):
+            if has_renderable_entities(layout):
                 return layout, layout.name
         return doc.modelspace(), "Model"
 
@@ -100,7 +113,7 @@ def _pick_layout(doc, mode: str, preferred_layout: str | None) -> tuple[object, 
                 return layout, layout.name
 
     for layout in paperspaces:
-        if len(layout):
+        if has_renderable_entities(layout):
             return layout, layout.name
     return doc.modelspace(), "Model"
 
@@ -157,7 +170,9 @@ def _figure_size_inches(layout, dpi: int) -> tuple[float, float]:
     return 12.0, 8.0
 
 
-def _normalize_image_output(image_file: Path, image_format: str, dpi: int) -> None:
+def _normalize_image_output(
+    image_file: Path, image_format: str, dpi: int, expected_size: tuple[int, int] | None = None
+) -> tuple[int, int]:
     from PIL import Image
 
     fmt = image_format.upper()
@@ -166,10 +181,13 @@ def _normalize_image_output(image_file: Path, image_format: str, dpi: int) -> No
 
     with Image.open(image_file) as im:
         rgb = im.convert("RGB")
+        if expected_size and rgb.size != expected_size:
+            rgb = rgb.resize(expected_size, Image.Resampling.LANCZOS)
         if fmt == "JPEG":
             rgb.save(image_file, format=fmt, quality=95, subsampling=0, dpi=(dpi, dpi))
         else:
             rgb.save(image_file, format=fmt, dpi=(dpi, dpi))
+        return rgb.size
 
 
 def _render_dxf_to_image(
@@ -179,10 +197,17 @@ def _render_dxf_to_image(
     dpi: int,
     layout_mode: str,
     preferred_layout: str | None,
+    color_mode: str,
 ) -> tuple[str, tuple[int, int]]:
     import matplotlib.pyplot as plt
     import ezdxf
     from ezdxf.addons.drawing import Frontend, RenderContext
+    from ezdxf.addons.drawing.config import (
+        BackgroundPolicy,
+        ColorPolicy,
+        Configuration,
+        ProxyGraphicPolicy,
+    )
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 
     doc = ezdxf.readfile(dxf_file)
@@ -196,14 +221,26 @@ def _render_dxf_to_image(
 
     ctx = RenderContext(doc)
     out = MatplotlibBackend(ax)
-    Frontend(ctx, out).draw_layout(target_layout, finalize=True)
+    color_policy = ColorPolicy.BLACK if color_mode == "bw" else ColorPolicy.COLOR
+    draw_config = Configuration.defaults().with_changes(
+        color_policy=color_policy,
+        background_policy=BackgroundPolicy.WHITE,
+        proxy_graphic_policy=ProxyGraphicPolicy.PREFER,
+    )
+    Frontend(ctx, out, config=draw_config).draw_layout(target_layout, finalize=True)
     fig.savefig(image_file, dpi=dpi, facecolor="white", transparent=False)
-    width_px = int(round(fig_w * dpi))
-    height_px = int(round(fig_h * dpi))
+    actual_inches = fig.get_size_inches()
+    width_px = int(round(actual_inches[0] * dpi))
+    height_px = int(round(actual_inches[1] * dpi))
     plt.close(fig)
 
-    _normalize_image_output(image_file, image_format, dpi)
-    return layout_name, (width_px, height_px)
+    final_size = _normalize_image_output(
+        image_file,
+        image_format,
+        dpi,
+        expected_size=(max(width_px, 1), max(height_px, 1)),
+    )
+    return layout_name, final_size
 
 
 def batch_convert(config: ConvertConfig) -> Iterable[str]:
@@ -212,6 +249,7 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
         raise FileNotFoundError(f"Input directory not found: {input_root}")
 
     layout_mode = config.normalized_layout_mode()
+    color_mode = config.normalized_color_mode()
 
     dwg_files = discover_dwgs(input_root)
     if not dwg_files:
@@ -246,11 +284,12 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
                 dpi=config.dpi,
                 layout_mode=layout_mode,
                 preferred_layout=config.preferred_layout,
+                color_mode=color_mode,
             )
             converted += 1
             yield (
                 f"[{index}/{len(dwg_files)}] 完成({layout_name}, {size_px[0]}x{size_px[1]}px, "
-                f"{config.dpi}dpi, 24-bit): {rel} -> {output_file}"
+                f"{config.dpi}dpi, 24-bit, color={color_mode}): {rel} -> {output_file}"
             )
 
     yield f"完成，成功输出 {converted}/{len(dwg_files)} 张图片。"

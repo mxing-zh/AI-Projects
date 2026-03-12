@@ -66,6 +66,7 @@ class App(tk.Tk):
         self.mirror_var = tk.BooleanVar(value=True)
         self.layout_mode_var = tk.StringVar(value="auto")
         self.layout_name_var = tk.StringVar()
+        self.color_mode_var = tk.StringVar(value="bw")
 
         self._build_ui()
         self._init_oda_path()
@@ -107,6 +108,16 @@ class App(tk.Tk):
 
         ttk.Label(option_frame, text="指定布局名(可选)").grid(row=1, column=2, sticky="e", pady=(8, 0))
         ttk.Entry(option_frame, textvariable=self.layout_name_var, width=18).grid(row=1, column=3, sticky="w", padx=6, pady=(8, 0))
+
+        ttk.Label(option_frame, text="颜色模式").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            option_frame,
+            textvariable=self.color_mode_var,
+            values=["bw", "original"],
+            width=12,
+            state="readonly",
+        ).grid(row=2, column=1, sticky="w", padx=6, pady=(8, 0))
+        ttk.Label(option_frame, text="bw=黑白, original=保留原色").grid(row=2, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
         self.start_btn = ttk.Button(frm, text="开始批量转换", command=self._start)
         self.start_btn.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 8))
@@ -171,6 +182,7 @@ class App(tk.Tk):
             oda_converter=Path(self.oda_var.get().strip()) if self.oda_var.get().strip() else None,
             layout_mode=self.layout_mode_var.get(),
             preferred_layout=self.layout_name_var.get().strip() or None,
+            color_mode=self.color_mode_var.get(),
         )
 
         if not cfg.input_root.exists() or not cfg.output_root.exists():
