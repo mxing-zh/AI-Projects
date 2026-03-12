@@ -78,6 +78,9 @@ class App(tk.Tk):
         self.layout_name_var = tk.StringVar()
         self.color_mode_var = tk.StringVar(value="黑白")
         self.max_workers_var = tk.StringVar(value=str(auto_workers()))
+        # 兼容历史版本字段，避免旧UI引用触发 AttributeError
+        self.oda_workers_var = self.max_workers_var
+        self.batch_size_var = tk.StringVar(value="0")
 
         self._build_ui()
         self._init_oda_path()
@@ -128,20 +131,6 @@ class App(tk.Tk):
 
         ttk.Label(option_frame, text=f"渲染并发(建议值已填: {auto_workers()})").grid(row=3, column=2, sticky="e", pady=(8, 0))
         ttk.Entry(option_frame, textvariable=self.max_workers_var, width=10).grid(row=3, column=3, sticky="w", padx=6, pady=(8, 0))
-
-        self.progress_var = tk.DoubleVar(value=0.0)
-        self.progress_bar = ttk.Progressbar(frm, variable=self.progress_var, maximum=100)
-        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 4))
-        self.progress_label = ttk.Label(frm, text="进度: 0%")
-        self.progress_label.grid(row=6, column=0, columnspan=3, sticky="w")
-
-        ttk.Label(option_frame, text=f"渲染并发(0=自动, 建议{auto_workers()})").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(option_frame, textvariable=self.max_workers_var, width=10).grid(row=3, column=1, sticky="w", padx=6, pady=(8, 0))
-        ttk.Label(option_frame, text="ODA并发(0=自动)").grid(row=3, column=2, sticky="e", pady=(8, 0))
-        ttk.Entry(option_frame, textvariable=self.oda_workers_var, width=10).grid(row=3, column=3, sticky="w", padx=6, pady=(8, 0))
-
-        ttk.Label(option_frame, text="ODA批大小").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(option_frame, textvariable=self.batch_size_var, width=10).grid(row=4, column=1, sticky="w", padx=6, pady=(8, 0))
 
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_bar = ttk.Progressbar(frm, variable=self.progress_var, maximum=100)
