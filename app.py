@@ -12,6 +12,16 @@ from converter import ConvertConfig, auto_workers, batch_convert
 
 ODA_DOWNLOAD_URL = "https://www.opendesign.com/guestfiles/oda_file_converter"
 
+LAYOUT_MODE_LABELS = {
+    "自动（优先布局，回退模型）": "auto",
+    "模型空间": "model",
+    "指定布局（按下方布局名）": "layout",
+}
+COLOR_MODE_LABELS = {
+    "黑白": "bw",
+    "保留原色": "original",
+}
+
 
 def detect_oda_converter() -> Path | None:
     """Try to auto-detect ODA File Converter executable path."""
@@ -64,12 +74,10 @@ class App(tk.Tk):
         self.format_var = tk.StringVar(value="png")
         self.dpi_var = tk.StringVar(value="96")
         self.mirror_var = tk.BooleanVar(value=True)
-        self.layout_mode_var = tk.StringVar(value="auto")
+        self.layout_mode_var = tk.StringVar(value="自动（优先布局，回退模型）")
         self.layout_name_var = tk.StringVar()
-        self.color_mode_var = tk.StringVar(value="bw")
-        self.max_workers_var = tk.StringVar(value="0")
-        self.oda_workers_var = tk.StringVar(value="0")
-        self.batch_size_var = tk.StringVar(value="200")
+        self.color_mode_var = tk.StringVar(value="黑白")
+        self.max_workers_var = tk.StringVar(value=str(auto_workers()))
 
         self._build_ui()
         self._init_oda_path()
@@ -84,11 +92,7 @@ class App(tk.Tk):
 
         mode_frame = ttk.LabelFrame(frm, text="输出模式", padding=10)
         mode_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 8))
-        ttk.Checkbutton(
-            mode_frame,
-            text="保留原目录结构",
-            variable=self.mirror_var,
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(mode_frame, text="保留原目录结构", variable=self.mirror_var).grid(row=0, column=0, sticky="w")
 
         option_frame = ttk.LabelFrame(frm, text="渲染选项", padding=10)
         option_frame.grid(row=4, column=0, columnspan=3, sticky="ew")
@@ -104,23 +108,32 @@ class App(tk.Tk):
         ttk.Combobox(
             option_frame,
             textvariable=self.layout_mode_var,
-            values=["auto", "model", "layout"],
-            width=12,
+            values=list(LAYOUT_MODE_LABELS.keys()),
+            width=24,
             state="readonly",
         ).grid(row=1, column=1, sticky="w", padx=6, pady=(8, 0))
 
         ttk.Label(option_frame, text="指定布局名(可选)").grid(row=1, column=2, sticky="e", pady=(8, 0))
         ttk.Entry(option_frame, textvariable=self.layout_name_var, width=18).grid(row=1, column=3, sticky="w", padx=6, pady=(8, 0))
+        ttk.Label(option_frame, text="注：指定布局模式时才会优先使用布局名").grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        ttk.Label(option_frame, text="颜色模式").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(option_frame, text="颜色模式").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(
             option_frame,
             textvariable=self.color_mode_var,
-            values=["bw", "original"],
+            values=list(COLOR_MODE_LABELS.keys()),
             width=12,
             state="readonly",
-        ).grid(row=2, column=1, sticky="w", padx=6, pady=(8, 0))
-        ttk.Label(option_frame, text="bw=黑白, original=保留原色").grid(row=2, column=2, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=1, sticky="w", padx=6, pady=(8, 0))
+
+        ttk.Label(option_frame, text=f"渲染并发(建议值已填: {auto_workers()})").grid(row=3, column=2, sticky="e", pady=(8, 0))
+        ttk.Entry(option_frame, textvariable=self.max_workers_var, width=10).grid(row=3, column=3, sticky="w", padx=6, pady=(8, 0))
+
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(frm, variable=self.progress_var, maximum=100)
+        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        self.progress_label = ttk.Label(frm, text="进度: 0%")
+        self.progress_label.grid(row=6, column=0, columnspan=3, sticky="w")
 
         ttk.Label(option_frame, text=f"渲染并发(0=自动, 建议{auto_workers()})").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(option_frame, textvariable=self.max_workers_var, width=10).grid(row=3, column=1, sticky="w", padx=6, pady=(8, 0))
@@ -194,20 +207,15 @@ class App(tk.Tk):
         try:
             dpi = int(self.dpi_var.get())
             max_workers = int(self.max_workers_var.get())
-            oda_workers = int(self.oda_workers_var.get())
-            batch_size = int(self.batch_size_var.get())
         except ValueError:
-            messagebox.showerror("参数错误", "DPI/并发/批大小 必须是整数")
+            messagebox.showerror("参数错误", "DPI/并发 必须是整数")
             return
 
         if dpi <= 0:
             messagebox.showerror("参数错误", "DPI 必须大于 0")
             return
-        if max_workers < 0 or oda_workers < 0:
-            messagebox.showerror("参数错误", "并发数不能小于 0")
-            return
-        if batch_size <= 0:
-            messagebox.showerror("参数错误", "批大小必须大于 0")
+        if max_workers <= 0:
+            messagebox.showerror("参数错误", "渲染并发必须大于 0")
             return
 
         cfg = ConvertConfig(
@@ -217,39 +225,15 @@ class App(tk.Tk):
             dpi=dpi,
             mirror_structure=self.mirror_var.get(),
             oda_converter=Path(self.oda_var.get().strip()) if self.oda_var.get().strip() else None,
-            layout_mode=self.layout_mode_var.get(),
+            layout_mode=LAYOUT_MODE_LABELS[self.layout_mode_var.get()],
             preferred_layout=self.layout_name_var.get().strip() or None,
-            color_mode=self.color_mode_var.get(),
+            color_mode=COLOR_MODE_LABELS[self.color_mode_var.get()],
             max_workers=max_workers,
-            oda_workers=oda_workers,
-            oda_batch_size=batch_size,
         )
 
         if not cfg.input_root.exists() or not cfg.output_root.exists():
             messagebox.showerror("参数错误", "请先选择存在的输入/输出目录")
             return
-
-        same_root = cfg.input_root.resolve() == cfg.output_root.resolve()
-        if same_root:
-            if cfg.mirror_structure:
-                prompt = (
-                    "检测到输出目录与源目录相同，且已勾选“保留原目录结构”。\n\n"
-                    "这会在各个源文件所在目录直接生成同名图片（png/jpg），\n"
-                    "源文件与输出文件会混放在一起。\n\n"
-                    "建议改用全新的输出目录，以免后续管理混乱。\n"
-                    "是否仍继续转换？"
-                )
-            else:
-                prompt = (
-                    "检测到输出目录与源目录相同，且未勾选“保留原目录结构”。\n\n"
-                    "这会把所有结果输出到源根目录，可能产生重名覆盖，\n"
-                    "源文件与输出文件会混放在一起。\n\n"
-                    "建议改用全新的输出目录。\n"
-                    "是否仍继续转换？"
-                )
-
-            if not messagebox.askyesno("输出目录建议", prompt):
-                return
 
         if cfg.oda_converter is None or not cfg.oda_converter.exists():
             go_download = messagebox.askyesno(

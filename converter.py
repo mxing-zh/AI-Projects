@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 import gc
 import os
-import shutil
 import subprocess
 import tempfile
 from typing import Iterable, List
@@ -18,14 +17,8 @@ COLOR_MODES = {"bw", "original"}
 
 def auto_workers() -> int:
     cpu = os.cpu_count() or 1
-    if cpu <= 2:
-        return 1
-    return max(1, cpu - 1)
-
-
-def auto_oda_workers(render_workers: int) -> int:
-    # ODA conversion is I/O + external process heavy; keep conservative.
-    return max(1, min(2, render_workers // 2 or 1))
+    # 保守策略：避免一次拉起过多渲染进程导致窗口/内存抖动
+    return max(1, min(4, cpu - 1 if cpu > 1 else 1))
 
 
 @dataclass
@@ -40,8 +33,6 @@ class ConvertConfig:
     preferred_layout: str | None = None
     color_mode: str = "bw"
     max_workers: int = 0
-    oda_workers: int = 0
-    oda_batch_size: int = 200
 
     def normalized_format(self) -> str:
         fmt = self.image_format.lower().strip(".")
@@ -68,14 +59,6 @@ class ConvertConfig:
             return auto_workers()
         return max(1, self.max_workers)
 
-    def normalized_oda_workers(self, render_workers: int) -> int:
-        if self.oda_workers <= 0:
-            return auto_oda_workers(render_workers)
-        return max(1, self.oda_workers)
-
-    def normalized_oda_batch_size(self) -> int:
-        return max(20, self.oda_batch_size)
-
 
 def discover_dwgs(input_root: Path) -> List[Path]:
     return sorted(p for p in input_root.rglob("*.dwg") if p.is_file())
@@ -93,7 +76,11 @@ def resolve_output_path(dwg_file: Path, config: ConvertConfig) -> Path:
     return (config.output_root / dwg_file.name).with_suffix(f".{fmt}")
 
 
-def _run_oda_converter(input_root: Path, dxf_root: Path, oda_converter: Path) -> None:
+def _run_oda_converter_stream(
+    input_root: Path,
+    dxf_root: Path,
+    oda_converter: Path,
+) -> Iterable[str]:
     if not oda_converter.exists():
         raise FileNotFoundError(f"ODA converter not found: {oda_converter}")
 
@@ -107,14 +94,24 @@ def _run_oda_converter(input_root: Path, dxf_root: Path, oda_converter: Path) ->
         "1",
         "*.dwg",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "ODA conversion failed.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"stdout: {proc.stdout}\n"
-            f"stderr: {proc.stderr}"
-        )
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            msg = line.strip()
+            if msg:
+                yield msg
+
+    code = proc.wait()
+    if code != 0:
+        raise RuntimeError(f"ODA conversion failed with exit code {code}: {' '.join(cmd)}")
 
 
 def _pick_layout(doc, mode: str, preferred_layout: str | None) -> tuple[object, str]:
@@ -173,6 +170,11 @@ def _safe_bbox_extents(layout):
         ext = bbox.extents(layout, fast=True)
     except ezdxf.DXFError:
         return None
+    return ext
+
+
+def _safe_bbox_size(layout) -> tuple[float, float] | None:
+    ext = _safe_bbox_extents(layout)
     if ext is None:
         return None
     return ext
@@ -236,6 +238,9 @@ def _render_dxf_to_image(
     preferred_layout: str | None,
     color_mode: str,
 ) -> tuple[str, tuple[int, int]]:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
     import ezdxf
     from ezdxf.addons.drawing import Frontend, RenderContext
@@ -293,33 +298,6 @@ def _render_dxf_to_image(
     return layout_name, final_size
 
 
-def _prepare_batch_inputs(files: list[Path], input_root: Path, staged_input_root: Path) -> None:
-    for src in files:
-        rel = src.relative_to(input_root)
-        dst = staged_input_root / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(src, dst)
-        except OSError:
-            shutil.copy2(src, dst)
-
-
-def _convert_batch_to_dxf(
-    batch_id: int,
-    files: list[Path],
-    input_root: Path,
-    oda_converter: Path,
-    work_root: Path,
-) -> tuple[int, Path, list[Path]]:
-    staged_input_root = work_root / f"batch_{batch_id:05d}_dwg"
-    staged_dxf_root = work_root / f"batch_{batch_id:05d}_dxf"
-    staged_input_root.mkdir(parents=True, exist_ok=True)
-    staged_dxf_root.mkdir(parents=True, exist_ok=True)
-    _prepare_batch_inputs(files, input_root, staged_input_root)
-    _run_oda_converter(staged_input_root, staged_dxf_root, oda_converter)
-    return batch_id, staged_dxf_root, files
-
-
 def _render_worker(task: tuple[Path, Path, str, int, str, str | None, str]) -> tuple[bool, str]:
     dxf_file, output_file, fmt, dpi, layout_mode, preferred_layout, color_mode = task
     try:
@@ -338,10 +316,6 @@ def _render_worker(task: tuple[Path, Path, str, int, str, str | None, str]) -> t
         return False, f"{dxf_file}: {exc}"
 
 
-def _chunked(items: list[Path], size: int) -> list[list[Path]]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
-
-
 def batch_convert(config: ConvertConfig) -> Iterable[str]:
     input_root = config.input_root.resolve()
     if not input_root.exists():
@@ -350,9 +324,7 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
     layout_mode = config.normalized_layout_mode()
     color_mode = config.normalized_color_mode()
     image_format = config.normalized_format()
-    render_workers = config.normalized_workers()
-    oda_workers = config.normalized_oda_workers(render_workers)
-    batch_size = config.normalized_oda_batch_size()
+    workers = config.normalized_workers()
 
     dwg_files = discover_dwgs(input_root)
     if not dwg_files:
@@ -364,77 +336,44 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
         raise ValueError("必须提供 ODA File Converter 可执行文件路径。")
 
     total = len(dwg_files)
-    batches = _chunked(dwg_files, batch_size)
-    yield f"任务总数: {total}，渲染并发: {render_workers}，ODA并发: {oda_workers}，批大小: {batch_size}"
+    yield f"任务总数: {total}，渲染并发: {workers}，ODA转换: 单进程"
 
-    converted = 0
-    failed = 0
-    skipped = 0
-    processed = 0
+    with tempfile.TemporaryDirectory(prefix="dwg2img_dxf_") as tmp:
+        dxf_root = Path(tmp)
+        yield "开始 ODA 单进程转换 DWG -> DXF..."
+        for oda_msg in _run_oda_converter_stream(input_root, dxf_root, converter_path):
+            if any(token in oda_msg.lower() for token in ("%", "progress", "processing", "converting")):
+                yield f"[ODA] {oda_msg}"
+        yield "ODA 转换完成，开始并发渲染图片..."
 
-    with tempfile.TemporaryDirectory(prefix="dwg2img_work_") as tmp:
-        work_root = Path(tmp)
+        tasks: list[tuple[Path, Path, str, int, str, str | None, str]] = []
+        skipped = 0
+        for dwg_file in dwg_files:
+            rel = dwg_file.relative_to(input_root)
+            dxf_file = (dxf_root / rel).with_suffix(".dxf")
+            if not dxf_file.exists():
+                skipped += 1
+                continue
+            output_file = resolve_output_path(dwg_file, config)
+            tasks.append((dxf_file, output_file, image_format, config.dpi, layout_mode, config.preferred_layout, color_mode))
 
-        with ThreadPoolExecutor(max_workers=oda_workers) as oda_pool, ProcessPoolExecutor(
-            max_workers=render_workers,
-            max_tasks_per_child=25,
-        ) as render_pool:
-            pending_oda: dict[Future, int] = {}
-            queued = 0
-            for batch_id, files in enumerate(batches, 1):
-                future = oda_pool.submit(
-                    _convert_batch_to_dxf,
-                    batch_id,
-                    files,
-                    input_root,
-                    converter_path,
-                    work_root,
-                )
-                pending_oda[future] = batch_id
-                queued += 1
+        processed = skipped
+        converted = 0
+        failed = 0
 
-            while pending_oda:
-                done, _ = wait(pending_oda.keys(), return_when=FIRST_COMPLETED)
-                for fut in done:
-                    batch_id = pending_oda.pop(fut)
-                    try:
-                        _, dxf_root, batch_files = fut.result()
-                    except Exception as exc:
-                        failed += len(batches[batch_id - 1])
-                        processed += len(batches[batch_id - 1])
-                        yield f"批次 {batch_id}/{queued} ODA 转换失败，已跳过该批: {exc}"
-                        yield f"进度: {processed}/{total} ({processed / total:.1%})"
-                        continue
+        if skipped:
+            yield f"跳过 {skipped} 个文件（未找到对应 DXF）。"
 
-                    tasks = []
-                    for dwg_file in batch_files:
-                        rel = dwg_file.relative_to(input_root)
-                        dxf_file = (dxf_root / rel).with_suffix(".dxf")
-                        if not dxf_file.exists():
-                            skipped += 1
-                            processed += 1
-                            continue
-
-                        output_file = resolve_output_path(dwg_file, config)
-                        tasks.append((dxf_file, output_file, image_format, config.dpi, layout_mode, config.preferred_layout, color_mode))
-
-                    if not tasks:
-                        yield f"批次 {batch_id}/{queued} 无可渲染DXF。"
-                        yield f"进度: {processed}/{total} ({processed / total:.1%})"
-                        shutil.rmtree(dxf_root, ignore_errors=True)
-                        continue
-
-                    futures = [render_pool.submit(_render_worker, t) for t in tasks]
-                    for rf in futures:
-                        ok, _ = rf.result()
-                        processed += 1
-                        if ok:
-                            converted += 1
-                        else:
-                            failed += 1
-                        if processed % 10 == 0 or processed == total:
-                            yield f"进度: {processed}/{total} ({processed / total:.1%})"
-
-                    shutil.rmtree(dxf_root, ignore_errors=True)
+        with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=30) as pool:
+            futures = [pool.submit(_render_worker, t) for t in tasks]
+            for idx, fut in enumerate(as_completed(futures), 1):
+                ok, _ = fut.result()
+                processed += 1
+                if ok:
+                    converted += 1
+                else:
+                    failed += 1
+                if processed % 10 == 0 or processed == total:
+                    yield f"进度: {processed}/{total} ({processed / total:.1%})"
 
     yield f"完成: 成功 {converted}，失败 {failed}，跳过 {skipped}，总计 {total}。"
