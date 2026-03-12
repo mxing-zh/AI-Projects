@@ -4,9 +4,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 import gc
+import multiprocessing as mp
 import os
 import subprocess
 import tempfile
+import time
 from typing import Iterable, List
 
 
@@ -329,7 +331,10 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
         raise ValueError("必须提供 ODA File Converter 可执行文件路径。")
 
     total = len(dwg_files)
-    yield f"任务总数: {total}，渲染并发: {workers}，ODA转换: 单进程"
+    yield f"任务开始: 总数 {total}，渲染并发 {workers}，ODA转换 单进程"
+
+    stage_all_start = time.perf_counter()
+    stage_oda_start = time.perf_counter()
 
     with tempfile.TemporaryDirectory(prefix="dwg2img_dxf_") as tmp:
         dxf_root = Path(tmp)
@@ -337,7 +342,8 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
         for oda_msg in _run_oda_converter_stream(input_root, dxf_root, converter_path):
             if any(token in oda_msg.lower() for token in ("%", "progress", "processing", "converting")):
                 yield f"[ODA] {oda_msg}"
-        yield "ODA 转换完成，开始并发渲染图片..."
+        oda_elapsed = time.perf_counter() - stage_oda_start
+        yield f"ODA 转换完成，耗时 {oda_elapsed:.1f}s，开始并发渲染图片..."
 
         tasks: list[tuple[Path, Path, str, int, str, str | None, str]] = []
         skipped = 0
@@ -353,20 +359,34 @@ def batch_convert(config: ConvertConfig) -> Iterable[str]:
         processed = skipped
         converted = 0
         failed = 0
+        fail_examples: list[str] = []
 
         if skipped:
             yield f"跳过 {skipped} 个文件（未找到对应 DXF）。"
 
-        with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=30) as pool:
+        render_total = len(tasks)
+        yield f"渲染阶段开始：待渲染 {render_total}，并发 {workers}"
+        stage_render_start = time.perf_counter()
+
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, max_tasks_per_child=30, mp_context=ctx) as pool:
             futures = [pool.submit(_render_worker, t) for t in tasks]
-            for idx, fut in enumerate(as_completed(futures), 1):
-                ok, _ = fut.result()
+            for fut in as_completed(futures):
+                ok, detail = fut.result()
                 processed += 1
                 if ok:
                     converted += 1
                 else:
                     failed += 1
-                if processed % 10 == 0 or processed == total:
+                    if len(fail_examples) < 5:
+                        fail_examples.append(detail)
+                if processed % 5 == 0 or processed == total:
                     yield f"进度: {processed}/{total} ({processed / total:.1%})"
 
-    yield f"完成: 成功 {converted}，失败 {failed}，跳过 {skipped}，总计 {total}。"
+        render_elapsed = time.perf_counter() - stage_render_start
+        yield f"渲染阶段结束：成功 {converted}，失败 {failed}，耗时 {render_elapsed:.1f}s"
+        for msg in fail_examples:
+            yield f"[失败样例] {msg}"
+
+    all_elapsed = time.perf_counter() - stage_all_start
+    yield f"任务结束: 成功 {converted}，失败 {failed}，跳过 {skipped}，总计 {total}，总耗时 {all_elapsed:.1f}s。"

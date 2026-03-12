@@ -4,6 +4,7 @@ import threading
 import shutil
 import sys
 import webbrowser
+from multiprocessing import freeze_support
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -255,4 +256,5 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    freeze_support()
     App().mainloop()
