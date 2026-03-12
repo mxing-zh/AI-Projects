@@ -60,11 +60,10 @@ class App(tk.Tk):
 
         self.input_var = tk.StringVar()
         self.output_var = tk.StringVar()
-        self.single_dir_var = tk.StringVar()
         self.oda_var = tk.StringVar()
         self.format_var = tk.StringVar(value="png")
         self.dpi_var = tk.StringVar(value="96")
-        self.mode_var = tk.StringVar(value="mirror")
+        self.mirror_var = tk.BooleanVar(value=True)
         self.layout_mode_var = tk.StringVar(value="auto")
         self.layout_name_var = tk.StringVar()
 
@@ -81,28 +80,11 @@ class App(tk.Tk):
 
         mode_frame = ttk.LabelFrame(frm, text="输出模式", padding=10)
         mode_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 8))
-        mode_frame.columnconfigure(1, weight=1)
-
-        ttk.Radiobutton(
+        ttk.Checkbutton(
             mode_frame,
-            text="保持源目录结构（推荐）",
-            variable=self.mode_var,
-            value="mirror",
-            command=self._on_mode_change,
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-
-        ttk.Radiobutton(
-            mode_frame,
-            text="全部输出到单目录",
-            variable=self.mode_var,
-            value="single",
-            command=self._on_mode_change,
-        ).grid(row=1, column=0, sticky="w")
-
-        self.single_entry = ttk.Entry(mode_frame, textvariable=self.single_dir_var)
-        self.single_entry.grid(row=1, column=1, sticky="ew", padx=6)
-        self.single_btn = ttk.Button(mode_frame, text="选择", command=self._choose_single)
-        self.single_btn.grid(row=1, column=2, sticky="e")
+            text="保留原目录结构",
+            variable=self.mirror_var,
+        ).grid(row=0, column=0, sticky="w")
 
         option_frame = ttk.LabelFrame(frm, text="渲染选项", padding=10)
         option_frame.grid(row=4, column=0, columnspan=3, sticky="ew")
@@ -134,7 +116,6 @@ class App(tk.Tk):
 
         frm.columnconfigure(1, weight=1)
         frm.rowconfigure(6, weight=1)
-        self._on_mode_change()
 
     def _init_oda_path(self) -> None:
         detected = detect_oda_converter()
@@ -160,21 +141,10 @@ class App(tk.Tk):
         if p:
             self.output_var.set(p)
 
-    def _choose_single(self) -> None:
-        p = filedialog.askdirectory(title="选择单目录输出")
-        if p:
-            self.single_dir_var.set(p)
-
     def _choose_oda_file(self) -> None:
         p = filedialog.askopenfilename(title="选择 ODAFileConverter 可执行文件")
         if p:
             self.oda_var.set(p)
-
-    def _on_mode_change(self) -> None:
-        enabled = self.mode_var.get() == "single"
-        state = "normal" if enabled else "disabled"
-        self.single_entry.configure(state=state)
-        self.single_btn.configure(state=state)
 
     def _append_log(self, message: str) -> None:
         self.log_text.insert(tk.END, message + "\n")
@@ -192,16 +162,12 @@ class App(tk.Tk):
             messagebox.showerror("参数错误", "DPI 必须大于 0")
             return
 
-        mode = self.mode_var.get()
-        single_dir = Path(self.single_dir_var.get()) if mode == "single" and self.single_dir_var.get().strip() else None
-
         cfg = ConvertConfig(
             input_root=Path(self.input_var.get().strip()),
             output_root=Path(self.output_var.get().strip()),
             image_format=self.format_var.get(),
             dpi=dpi,
-            single_output_dir=single_dir,
-            mirror_structure=(mode == "mirror"),
+            mirror_structure=self.mirror_var.get(),
             oda_converter=Path(self.oda_var.get().strip()) if self.oda_var.get().strip() else None,
             layout_mode=self.layout_mode_var.get(),
             preferred_layout=self.layout_name_var.get().strip() or None,
@@ -210,6 +176,28 @@ class App(tk.Tk):
         if not cfg.input_root.exists() or not cfg.output_root.exists():
             messagebox.showerror("参数错误", "请先选择存在的输入/输出目录")
             return
+
+        same_root = cfg.input_root.resolve() == cfg.output_root.resolve()
+        if same_root:
+            if cfg.mirror_structure:
+                prompt = (
+                    "检测到输出目录与源目录相同，且已勾选“保留原目录结构”。\n\n"
+                    "这会在各个源文件所在目录直接生成同名图片（png/jpg），\n"
+                    "源文件与输出文件会混放在一起。\n\n"
+                    "建议改用全新的输出目录，以免后续管理混乱。\n"
+                    "是否仍继续转换？"
+                )
+            else:
+                prompt = (
+                    "检测到输出目录与源目录相同，且未勾选“保留原目录结构”。\n\n"
+                    "这会把所有结果输出到源根目录，可能产生重名覆盖，\n"
+                    "源文件与输出文件会混放在一起。\n\n"
+                    "建议改用全新的输出目录。\n"
+                    "是否仍继续转换？"
+                )
+
+            if not messagebox.askyesno("输出目录建议", prompt):
+                return
 
         if cfg.oda_converter is None or not cfg.oda_converter.exists():
             go_download = messagebox.askyesno(
@@ -220,10 +208,6 @@ class App(tk.Tk):
             )
             if go_download:
                 webbrowser.open(ODA_DOWNLOAD_URL)
-            return
-
-        if cfg.single_output_dir and not cfg.single_output_dir.exists():
-            messagebox.showerror("参数错误", "单目录输出路径不存在")
             return
 
         self.start_btn.configure(state="disabled")

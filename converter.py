@@ -18,7 +18,6 @@ class ConvertConfig:
     image_format: str = "png"
     dpi: int = 96
     mirror_structure: bool = True
-    single_output_dir: Path | None = None
     oda_converter: Path | None = None
     layout_mode: str = "auto"
     preferred_layout: str | None = None
@@ -44,14 +43,14 @@ def discover_dwgs(input_root: Path) -> List[Path]:
 
 def resolve_output_path(dwg_file: Path, config: ConvertConfig) -> Path:
     fmt = config.normalized_format()
-    if config.single_output_dir:
-        config.single_output_dir.mkdir(parents=True, exist_ok=True)
-        return config.single_output_dir / f"{dwg_file.stem}.{fmt}"
+    if config.mirror_structure:
+        rel = dwg_file.relative_to(config.input_root)
+        destination = config.output_root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        return destination.with_suffix(f".{fmt}")
 
-    rel = dwg_file.relative_to(config.input_root)
-    destination = config.output_root / rel
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    return destination.with_suffix(f".{fmt}")
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    return (config.output_root / dwg_file.name).with_suffix(f".{fmt}")
 
 
 def _run_oda_converter(input_root: Path, dxf_root: Path, oda_converter: Path) -> None:
