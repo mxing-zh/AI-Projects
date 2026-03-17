@@ -190,6 +190,9 @@ def _pick_layout(doc, mode: str, preferred_layout: str | None) -> tuple[object, 
     def has_renderable_entities(layout) -> bool:
         return len(layout) > 0
 
+    def has_substantive_paperspace_entities(layout) -> bool:
+        return any(entity.dxftype() != "VIEWPORT" for entity in layout)
+
     if mode == "layout":
         if preferred:
             for layout in paperspaces:
@@ -205,6 +208,11 @@ def _pick_layout(doc, mode: str, preferred_layout: str | None) -> tuple[object, 
             if layout.name.lower() == preferred:
                 return layout, layout.name
 
+    for layout in paperspaces:
+        if has_substantive_paperspace_entities(layout):
+            return layout, layout.name
+    if has_renderable_entities(doc.modelspace()):
+        return doc.modelspace(), "Model"
     for layout in paperspaces:
         if has_renderable_entities(layout):
             return layout, layout.name
